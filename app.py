@@ -428,8 +428,19 @@ def load_selected_asins(path_string: str):
     path = Path(path_string)
     if not path.is_file():
         raise FileNotFoundError(f"선택 샘플 파일을 찾을 수 없습니다: {path}")
+
     data = json.loads(path.read_text(encoding="utf-8"))
-    return set(str(x).strip() for x in data if str(x).strip())
+    selected = []
+    seen = set()
+
+    for value in data:
+        asin = str(value).strip()
+        if asin and asin not in seen:
+            selected.append(asin)
+            seen.add(asin)
+
+    return selected
+
 
 @st.cache_data(show_spinner=False)
 def load_metadata_map(path_string: str):
@@ -442,31 +453,67 @@ def load_metadata_map(path_string: str):
 
 
 @st.cache_data(show_spinner=False)
+def load_selected_metadata_map(path_string: str, selected_asins: tuple[str, ...]):
+    """선택된 ASIN만 읽는다. JSONL은 한 줄씩 읽고 모두 찾으면 즉시 중단한다."""
+    path = Path(path_string)
+    if not path.is_file():
+        raise FileNotFoundError(f"파일을 찾을 수 없습니다: {path}")
+
+    selected_set = set(selected_asins)
+    if not selected_set:
+        return {}
+
+    mapping = {}
+
+    # 대용량 JSONL은 전체 파일을 메모리에 올리지 않고 필요한 행만 찾는다.
+    if path.suffix.lower() == ".jsonl":
+        with path.open("r", encoding="utf-8", errors="ignore") as file:
+            for line in file:
+                row = parse_object(line)
+                if not isinstance(row, dict):
+                    continue
+
+                asin = normalize_text(row.get("asin"))
+                if asin in selected_set:
+                    mapping[asin] = row
+                    if len(mapping) == len(selected_set):
+                        break
+
+        return mapping
+
+    # 일반 JSON은 기존 로더를 사용하되 선택된 ASIN만 보관한다.
+    for row in load_records(path_string):
+        asin = normalize_text(row.get("asin"))
+        if asin in selected_set:
+            mapping[asin] = row
+            if len(mapping) == len(selected_set):
+                break
+
+    return mapping
+
+
+@st.cache_data(show_spinner=False)
 def load_image_candidates(
     missing_meta_path_string: str,
     raw_image_dir_string: str,
     generated_image_dir_string: str,
+    selected_asins: tuple[str, ...],
 ):
     raw_image_dir = Path(raw_image_dir_string)
     generated_image_dir = Path(generated_image_dir_string)
+    selected_map = load_selected_metadata_map(missing_meta_path_string, selected_asins)
 
     candidates = []
     stats = {
-        "metadata_rows": 0,
-        "missing_rows": 0,
+        "selected_rows": len(selected_asins),
+        "found_metadata_rows": len(selected_map),
         "missing_raw_image": 0,
         "missing_generated_image": 0,
     }
 
-    for row in load_records(missing_meta_path_string):
-        stats["metadata_rows"] += 1
-
-        if normalize_text(row.get("imUrl")):
-            continue
-
-        stats["missing_rows"] += 1
-        asin = normalize_text(row.get("asin"))
-        if not asin:
+    for asin in selected_asins:
+        row = selected_map.get(asin)
+        if row is None or normalize_text(row.get("imUrl")):
             continue
 
         raw_image_path = raw_image_dir / f"{asin}.jpg"
@@ -490,7 +537,6 @@ def load_image_candidates(
             }
         )
 
-    candidates.sort(key=lambda item: item["asin"])
     return candidates, stats
 
 
@@ -511,16 +557,22 @@ def load_text_candidates(
     augmented_meta_path_string: str,
     original_meta_path_string: str,
     raw_image_dir_string: str,
+    selected_asins: tuple[str, ...],
 ):
     raw_image_dir = Path(raw_image_dir_string)
-    augmented_map = load_metadata_map(augmented_meta_path_string)
-    original_map = load_metadata_map(original_meta_path_string)
+
+    # 세 메타데이터 파일 모두 whitelist에 포함된 ASIN만 읽는다.
+    missing_map = load_selected_metadata_map(missing_meta_path_string, selected_asins)
+    augmented_map = load_selected_metadata_map(augmented_meta_path_string, selected_asins)
+    original_map = load_selected_metadata_map(original_meta_path_string, selected_asins)
 
     candidates = []
     generated_field_counts = {}
     stats = {
-        "metadata_rows": 0,
-        "missing_rows": 0,
+        "selected_rows": len(selected_asins),
+        "found_missing_rows": len(missing_map),
+        "found_augmented_rows": len(augmented_map),
+        "found_original_rows": len(original_map),
         "missing_raw_image": 0,
         "missing_augmented_item": 0,
         "missing_description_generated_key": 0,
@@ -528,18 +580,11 @@ def load_text_candidates(
         "missing_original_item": 0,
         "missing_original_text": 0,
         "generated_field_counts": generated_field_counts,
-        "sample_augmented_keys": [],
     }
 
-    for missing_row in load_records(missing_meta_path_string):
-        stats["metadata_rows"] += 1
-
-        if normalize_text(missing_row.get("description")):
-            continue
-
-        stats["missing_rows"] += 1
-        asin = normalize_text(missing_row.get("asin"))
-        if not asin:
+    for asin in selected_asins:
+        missing_row = missing_map.get(asin)
+        if missing_row is None or normalize_text(missing_row.get("description")):
             continue
 
         raw_image_path = raw_image_dir / f"{asin}.jpg"
@@ -553,9 +598,6 @@ def load_text_candidates(
         if augmented_row is None:
             stats["missing_augmented_item"] += 1
             continue
-
-        if not stats["sample_augmented_keys"]:
-            stats["sample_augmented_keys"] = list(augmented_row.keys())
 
         if "description_generated" not in augmented_row:
             stats["missing_description_generated_key"] += 1
@@ -593,7 +635,6 @@ def load_text_candidates(
             }
         )
 
-    candidates.sort(key=lambda item: item["asin"])
     return candidates, stats
 
 
@@ -928,26 +969,27 @@ def main() -> None:
                 generated_image_dir = str(generated_image_dir_default)
 
     try:
+        selected_path = image_selected_path if mode == "Image" else text_selected_path
+        selected_asins = tuple(load_selected_asins(str(selected_path)))
+
         if mode == "Image":
             candidates, stats = load_image_candidates(
                 missing_meta_path,
                 raw_image_dir,
                 generated_image_dir,
+                selected_asins,
             )
-            selected_asins = load_selected_asins(str(image_selected_path))
         else:
             candidates, stats = load_text_candidates(
                 missing_meta_path,
                 augmented_text_path,
                 original_meta_path,
                 raw_image_dir,
+                selected_asins,
             )
-            selected_asins = load_selected_asins(str(text_selected_path))
     except Exception as error:
         st.error(str(error))
         st.stop()
-
-    candidates = [item for item in candidates if item["asin"] in selected_asins]
 
     if not candidates:
         st.warning(
