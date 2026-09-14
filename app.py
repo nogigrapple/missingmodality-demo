@@ -15,21 +15,16 @@ import streamlit as st
 # 향후 Baby / Beauty / Toys_Games 등 데이터셋 선택 기능으로 확장할 예정.
 # 현재 시연에서는 Baby만 사용한다.
 BASE_DIR = Path(__file__).resolve().parent
-DEMO_DATA_DIR = BASE_DIR / "data"
-ORIGINAL_DATA_DIR = BASE_DIR / "data"
+DATASET = "Baby"
+DEMO_DATA_DIR = BASE_DIR / "data" / DATASET
 
 DEFAULT_RAW_IMAGE_DIR = DEMO_DATA_DIR / "raw_images"
 DEFAULT_GENERATED_IMAGE_DIR = DEMO_DATA_DIR / "generated_images"
 DEFAULT_META_DIR = DEMO_DATA_DIR / "meta-data"
+DEFAULT_ORIGINAL_META_PATH = DEMO_DATA_DIR / f"{DATASET}.json"
 
-LOCAL_ORIGINAL_META_PATH = DEMO_DATA_DIR / "Baby.json"
-SERVER_ORIGINAL_META_PATH = ORIGINAL_DATA_DIR / "Baby.json"
-DEFAULT_ORIGINAL_META_PATH = (
-    LOCAL_ORIGINAL_META_PATH
-    if LOCAL_ORIGINAL_META_PATH.is_file()
-    else SERVER_ORIGINAL_META_PATH
-)
-
+IMAGE_SELECTED_PATH = DEMO_DATA_DIR / "image_final_selected.json"
+TEXT_SELECTED_PATH = DEMO_DATA_DIR / "text_final_selected.json"
 
 # ---------------------------------------------------------------------
 # Page config + visual system
@@ -432,6 +427,13 @@ def load_records(path_string: str):
 
     return records
 
+@st.cache_data(show_spinner=False)
+def load_selected_asins(path_string: str):
+    path = Path(path_string)
+    if not path.is_file():
+        raise FileNotFoundError(f"선택 샘플 파일을 찾을 수 없습니다: {path}")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return set(str(x).strip() for x in data if str(x).strip())
 
 @st.cache_data(show_spinner=False)
 def load_metadata_map(path_string: str):
@@ -921,6 +923,10 @@ def main() -> None:
     except Exception as error:
         st.error(str(error))
         st.stop()
+
+    selected_path = IMAGE_SELECTED_PATH if mode == "Image" else TEXT_SELECTED_PATH
+    selected_asins = load_selected_asins(str(selected_path))
+    candidates = [item for item in candidates if item["asin"] in selected_asins]
 
     if not candidates:
         st.warning(
